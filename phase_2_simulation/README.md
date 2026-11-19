@@ -1,0 +1,84 @@
+# LCD plant simulation (SimPy)
+
+An Arena-style discrete-event model of the Phase 1 LCD plant plan. It covers:
+- part flow along `../precedence_diagram.png`: Separate after 1-M and 2-M, and Match of the three sub-assemblies before 7-M (M860) or 8-A (M970/M1080),
+- two mixed-model cells (Fab WS 1–8, Assembly WS 9–12),
+- EOQ lots,
+- cross-trained operator pools,
+- scrap, planned maintenance and breakdowns.
+
+## Run it
+```bash
+pip install -r requirements.txt
+jupyter notebook lcd_simulation.ipynb      # or open it in VS Code
+```
+A full run of the notebook takes about 2 min. Replications run in parallel.
+
+Quick use from Python:
+```python
+from lcd_sim.params import get_scenario
+from lcd_sim.stats import run, run_replications
+from lcd_sim import plots as P
+
+res = run(get_scenario(3))                       # one replication, Year 3 plan
+res.bottlenecks(); res.stations; res.operators; res.scrap
+P.plot_wave_levels(res); P.plot_block_diagram(res)   # daily stacked queue bars; precedence block view
+
+reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_jobs=8)
+```
+
+## Files
+| File | What it holds |
+|---|---|
+| `lcd_sim/params.py` | All input data: routing, scrap, efficiency, maintenance, machines and operators per year, EOQ, demand. Also the precedence segments, the Phase 1 scrap factors, and the `Scenario` switches. |
+| `lcd_sim/model.py` | The SimPy model: lot release, Separate/Match, lot gates, machines, operator pools, scrap decide, failures. |
+| `lcd_sim/stats.py` | Reports: utilization and capacity per station, machine and operator; scrap; flow time; replication CIs. |
+| `lcd_sim/plots.py` | Charts: wave levels (daily stacked queue bars by model), WIP, resource states, utilization vs Phase 1, operator Gantt and heatmap, scrap Pareto, precedence block diagram. |
+| `lcd_sim/experiments.py` | Scenario comparisons: maintenance, operator sweep, capacity what-ifs, Years 1–3. |
+| `lcd_simulation.ipynb` | The working notebook. |
+
+## Scenario switches (`get_scenario(year, ...)`)
+| Switch | Default | What it does |
+|---|---|---|
+| `machines={"9-M": 7}` | Phase 1 count | Override the number of machines at a station. |
+| `operators={"Fab": 8}` | Phase 1 crew | Override the crew per shift for a cell. |
+| `run_weeks`, `warmup_weeks` | 8, 2 | Run length and warm-up. |
+| `seed` | 1 | Random seed. |
+| `scrap_on`, `scrap_scale` | True, 1.0 | Turn scrap on or off. `scrap_scale=0.5` models SPC. |
+| `failures_on`, `pm_on` | True, True | Breakdowns and planned maintenance. |
+| `failure_mode` | `"count"` | `"count"` = every N parts. `"time"` = EXPO(MTBF) wall-clock. |
+| `tqm` | False | Cuts repair and PM time by 75%. |
+| `setup_scope` | `"machine"` | `"machine"` = every machine sets up for a new lot. `"station"` = one setup per lot per station (the Phase 1 RCA convention). |
+| `op_priority={"1-M": -1}` | none | Seize priority for operators. A lower number is served first. |
+| `repair_uses_operator` | False | Repairs and PM tie up a line operator. |
+| `move_time` | 0 | Minutes to move a part between stations (material handling). |
+
+## Modeling assumptions (to confirm)
+1. **Process times are deterministic.** Each part's time is (load + cycle × learning + unload) / efficiency. Setup / efficiency is charged when a machine starts a lot of a different model. Learning is 0.99^(year−1).
+2. **Flow follows the precedence diagram.**
+   - A lot launches `ceil(EOQ × f₁₋ₘ)` component kits at 1-M.
+   - **After 1-M** the kit separates into a keyboard (→ 4-A) and an LCD/PCB set (→ 2-M).
+   - **After 2-M** that separates into a power strip/PCB/LCD branch (→ 3-A → 5-A) and a backlight/sensor branch (→ 6-A).
+   - Each branch is sent `ceil(EOQ × f)` items, where *f* is the Phase 1 scrap factor (`Prod Req` sheet), so enough survive to make EOQ good units.
+   - Components beyond a branch's need are counted as **spare**.
+   - **Match:** one sub-assembly of each type from the same lot becomes one display assembly → 7-M (M860) or 8-A (M970/M1080). Sub-assemblies left over when the lot closes are counted as **unmatched**.
+3. **Scrap** is a Bernoulli draw after each operation, at the station × model rate, and removes only the item at that station (e.g. one keyboard).
+4. **Failures are count-based and non-preemptive.**
+   - PM happens every *PM frequency* parts.
+   - Breakdowns happen every `MTBF × 60 / average minutes per part` parts, with the average weighted by the launched mix.
+   - The machine finishes its part before going down.
+   - Repairs use maintenance staff, not line operators, unless `repair_uses_operator=True`.
+5. **One lot per station at a time.** A station finishes every surviving part of its current lot before it starts the next lot, in release order. Lots still pipeline across stations.
+6. **Operators** are a FIFO pool per cell, sized at the crew per shift.
+   - Manual benches hold the operator for setup and the whole cycle.
+   - Automatic machines hold the operator only for setup, load and unload.
+7. **Only productive time is simulated** (2 × 7.5 h shifts, 5 days, 50 weeks, so 4,500 min/week). WIP carries over between shifts.
+8. **Lots are released at even intervals** across the year in a smooth mixed-model sequence.
+9. **Buffers are unbounded** (no blocking) and moves are instantaneous by default.
+10. **Planned yields** (EOQ / kits) are 78.3% / 85.3% / 83.5%, the same as in the Phase 1 report. Because scrap is random, a lot can fall a few units short of EOQ (on average lots deliver 99.4% of EOQ).
+
+## Validation
+In the notebook (section 8), the model runs with failures and PM off and with `setup_scope="station"`. Under those settings:
+- **Year 3** station utilizations match Phase 1 Table 2.3.1 within ±1.2 points.
+- **Lots** deliver about EOQ good units.
+- **Accounting:** there are zero lot-integrity violations, and every closed lot has nothing left owed at any station.
