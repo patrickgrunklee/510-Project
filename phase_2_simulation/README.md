@@ -112,6 +112,15 @@ Year 3, 8 replications × 20 measured weeks, weekly output as % of each model's 
 
 The release order is fully deterministic. The remaining week-to-week variation comes from random scrap and failures. Averages sit just under 100% because lots deliver ~99.4% of EOQ on average (assumption 10). Tests: `tests/test_heijunka.py`.
 
+The table above was measured before the 75% setup cut was extended to every station and before SPC (`scrap_scale=0.25`). `heijunka_simulation.ipynb` reruns the comparison under the current inputs (10 replications × 8 weeks, mean weekly output as % of each model's demand):
+
+| Policy | M860 | M970 | M1080 | Avg WIP | Flow time |
+|---|---|---|---|---|---|
+| Cyclic + workcell, no SPC | 89.9% | 112.7% | 99.4% | 180 | 1.6–2.1 h |
+| Cyclic + workcell, SPC | 93.1% | 110.0% | 98.3% | 72 | 0.8–1.1 h |
+| Heijunka + workcell, no SPC | 99.9% | 99.8% | 99.5% | 175 | 1.6–2.0 h |
+| **Heijunka + workcell, SPC** | **100.1%** | **100.1%** | **99.8%** | **70** | **0.8–1.0 h** |
+
 ## Validation
 In the notebook (section 8), the historical Phase 1 check runs with whole-lot arrivals (`release_mode="batch"`), failures and PM off, and `setup_scope="station"`. Under those settings:
 - **Year 3** station utilizations match Phase 1 Table 2.3.1 within ±1.2 points.

@@ -39,6 +39,14 @@ class HeijunkaReleaseTests(unittest.TestCase):
         for m in MODELS:
             self.assertGreater(res.throughput.loc[m, "% of demand"], 0.97, m)
 
+    def test_lot_closed_with_surplus_kit_in_process_passes_checks(self):
+        # Seed 1 + SPC: M860 lot 53 finishes all planned assemblies 8 min before the
+        # run ends while its last (surplus) kit is still in process. Not an error.
+        sc = get_scenario(3, release_mode="heijunka", setup_scope="workcell",
+                          scrap_scale=0.25, seed=1, keep_logs=False)
+        res = run(sc)
+        self.assertTrue(all(v == 0 for k, v in res.checks.items() if "must be 0" in k), res.checks)
+
     def test_station_setups_rejected(self):
         with self.assertRaises(ValueError):
             get_scenario(3, release_mode="heijunka", setup_scope="station")
