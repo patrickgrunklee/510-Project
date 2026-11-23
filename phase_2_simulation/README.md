@@ -45,7 +45,7 @@ reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_
 | `machines={"9-M": 7}` | Phase 1 count | Override the number of machines at a station. |
 | `operators={"Fab": 8}` | Phase 1 crew | Override the crew per shift for a cell. |
 | `run_weeks`, `warmup_weeks` | 8, 2 | Run length and warm-up. |
-| `release_mode` | `"continuous"` | `"continuous"`: evenly spaced kits in product runs with lot gates. `"batch"`: whole-lot arrivals. `"cyclic"`: M860 → M970 → M1080 one kit at a time, global FIFO station queues, and no lot gates. |
+| `release_mode` | `"continuous"` | `"continuous"`: evenly spaced kits in product runs with lot gates. `"batch"`: whole-lot arrivals. `"cyclic"`: M860 → M970 → M1080 one kit at a time, global FIFO station queues, and no lot gates. `"heijunka"`: like `"cyclic"`, but the model order is a deterministic level sequence weighted by planned kit volume (see Experiment 3). |
 | `seed` | 1 | Random seed. |
 | `scrap_on`, `scrap_scale` | True, 1.0 | Turn scrap on or off. `scrap_scale=0.5` models SPC. |
 | `failures_on`, `pm_on` | True, True | Breakdowns and planned maintenance. |
@@ -89,6 +89,27 @@ Notebook section 15 uses `get_scenario(3, release_mode="cyclic")`. One kit arriv
 Stations serve arrived units FIFO across all products. Parallel machines may process different products simultaneously; an idle machine already configured for the next unit's model is preferred. Every machine pays the destination model's setup time whenever its model changes, including the first setup. The existing zero setup inputs and 75% reductions still apply. There is no resequencing to form product batches and no WIP cap.
 
 Per-model EOQ groups remain only as scrap-planning and component-matching records: matching units assemble as soon as components are available within their record, with no wait for the whole group. These records impose no arrival or station gates. They preserve the existing split quantities and surplus accounting. Growing WIP under the unbounded arrival policy indicates overload; an eight-week average then describes that window, not steady state.
+
+## Experiment 3: levelled (heijunka) kit release
+`get_scenario(3, release_mode="heijunka", setup_scope="workcell")` keeps everything from Experiment 2 (one kit every 1.020 productive minutes, global FIFO stations, no lot gates, workcell setups) but replaces the equal 1-2-3 rotation with a deterministic sequence weighted by each model's planned kit volume (`launch_qty × lots/yr`: about 37% M860, 30% M970, 34% M1080 in Year 3).
+
+The sequence uses goal chasing: before kit *k*, each model's target is *k* × its kit share, and the model furthest behind its target is released (ties in M860/M970/M1080 order). Every prefix of the sequence is within one kit of the ideal mix, so each model's kits, and therefore its good output, arrive at an even rate that matches its own demand. The cyclic rotation sends each model a third of the kits, so it under-builds M860 (~90% of demand) and over-builds M970 (~113%).
+
+Year 3, 8 replications × 20 measured weeks, weekly output as % of each model's weekly demand:
+
+| Release | Model | Avg | Worst week | Best week | Std (pts) | Weeks ≥ 97% | Avg WIP |
+|---|---|---|---|---|---|---|---|
+| Continuous product runs (default) | M860 | 99.8% | 57.9% | 120.9% | 20.3 | 63% | 1,012 |
+| | M970 | 101.1% | 70.8% | 124.9% | 12.0 | 70% | |
+| | M1080 | 98.1% | 78.6% | 120.4% | 12.2 | 65% | |
+| Cyclic 1-2-3 + workcell | M860 | 89.8% | 83.4% | 95.3% | 1.7 | 0% | 198 |
+| | M970 | 112.9% | 106.0% | 120.3% | 2.0 | 100% | |
+| | M1080 | 99.2% | 93.6% | 104.0% | 1.7 | 93% | |
+| **Heijunka + workcell** | M860 | 99.7% | 93.9% | 103.6% | 1.6 | 96% | 195 |
+| | M970 | 99.7% | 95.3% | 103.7% | 1.4 | 99% | |
+| | M1080 | 99.5% | 95.1% | 103.6% | 1.4 | 96% | |
+
+The release order is fully deterministic. The remaining week-to-week variation comes from random scrap and failures. Averages sit just under 100% because lots deliver ~99.4% of EOQ on average (assumption 10). Tests: `tests/test_heijunka.py`.
 
 ## Validation
 In the notebook (section 8), the historical Phase 1 check runs with whole-lot arrivals (`release_mode="batch"`), failures and PM off, and `setup_scope="station"`. Under those settings:

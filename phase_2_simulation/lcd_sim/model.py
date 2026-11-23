@@ -203,7 +203,7 @@ class Station:
         return ev
 
     def dispatch(self):
-        if self.sim.sc.release_mode == "cyclic":
+        if self.sim.sc.unit_flow:
             if self.group_setup_active:
                 return
             # Global FIFO among arrived units; machines may run different models together.
@@ -361,10 +361,13 @@ class LCDPlant:
         return [m for _, _, m in sorted(pos)]
 
     def release(self):
-        if self.sc.release_mode == "cyclic":
+        if self.sc.unit_flow:
             # EOQ groups remain accounting/matching containers, never release or station gates.
+            # cyclic: strict 1-2-3 rotation; heijunka: sequence levelled by planned kit volume.
+            order = (self.sc.heijunka_sequence() if self.sc.release_mode == "heijunka"
+                     else itertools.cycle(MODELS))
             active, left = {}, {}
-            for model in itertools.cycle(MODELS):
+            for model in order:
                 if left.get(model, 0) == 0:
                     plan = self.plans[model]
                     active[model] = Lot(model, plan, self.sc.eoq[model][0],

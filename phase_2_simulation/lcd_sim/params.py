@@ -199,22 +199,23 @@ class Scenario:
     tqm_factor: float = 0.25
     repair_uses_operator: bool = False     # repairs/PM by maintenance, not line operators
     move_time: float = 0.0                 # min to move a part between stations
-    release_mode: str = "continuous"      # "batch", "continuous" product runs, or "cyclic" 1-2-3
+    release_mode: str = "continuous"      # "batch", "continuous" product runs, "cyclic" 1-2-3,
+                                          # or "heijunka" (kit-volume-weighted level sequence)
     setup_scope: str = "machine"           # "machine": every machine sets up for a new lot
                                            # "station": one setup per lot per station (Phase 1 RCA)
     op_priority: dict = field(default_factory=dict)  # ws -> priority (lower = served first)
     setup_crew: dict = field(default_factory=dict)   # workcell setup crew by station; default machine count
 
     def __post_init__(self):
-        if self.release_mode not in ("continuous", "batch", "cyclic"):
-            raise ValueError("release_mode must be 'continuous', 'batch', or 'cyclic'")
+        if self.release_mode not in ("continuous", "batch", "cyclic", "heijunka"):
+            raise ValueError("release_mode must be 'continuous', 'batch', 'cyclic', or 'heijunka'")
         if self.setup_scope not in ("machine", "station", "workcell"):
             raise ValueError("setup_scope must be 'machine', 'station', or 'workcell'")
-        if self.release_mode == "cyclic" and self.setup_scope == "station":
-            raise ValueError("Cyclic dispatch requires machine or workcell setups")
+        if self.unit_flow and self.setup_scope == "station":
+            raise ValueError("Cyclic/heijunka dispatch requires machine or workcell setups")
         if self.setup_scope == "workcell":
-            if self.release_mode != "cyclic":
-                raise ValueError("Workcell setup experiment requires cyclic mixed-product arrivals")
+            if not self.unit_flow:
+                raise ValueError("Workcell setup experiment requires cyclic or heijunka mixed-product arrivals")
             for ws, count in self.machines.items():
                 crew = self.setup_crew.get(ws, count)
                 if not isinstance(crew, int) or not 1 <= crew <= self.operators[STATION_INFO[ws]["cell"]]:
@@ -224,10 +225,37 @@ class Scenario:
 
     # derived ------------------------------------------------------------
     @property
+    def unit_flow(self) -> bool:
+        """One-kit-at-a-time mixed arrivals with global FIFO stations and no lot gates."""
+        return self.release_mode in ("cyclic", "heijunka")
+
+    def annual_kits(self) -> dict:
+        """Planned kits per year by model (launch quantity x lots per year)."""
+        return {m: self.launch_qty(m) * self.eoq[m][1] for m in MODELS}
+
+    def heijunka_sequence(self):
+        """Endless deterministic kit sequence, levelled by planned kit volume.
+
+        Goal chasing: before kit k, each model's target is k x its kit share;
+        release the model furthest behind its target (ties in MODELS order).
+        Every prefix of the sequence is within one kit of the ideal mix, so each
+        model's kits, and therefore its good output, arrive at an even rate.
+        """
+        kits = self.annual_kits()
+        total = sum(kits.values())
+        share = {m: kits[m] / total for m in MODELS}
+        released = dict.fromkeys(MODELS, 0)
+        k = 0
+        while True:
+            k += 1
+            m = max(MODELS, key=lambda x: k * share[x] - released[x])
+            released[m] += 1
+            yield m
+
+    @property
     def kit_interarrival_min(self) -> float:
         """Constant kit spacing preserving the planned annual kit volume and mix."""
-        annual_kits = sum(self.launch_qty(m) * self.eoq[m][1] for m in MODELS)
-        return MIN_PER_YEAR / annual_kits
+        return MIN_PER_YEAR / sum(self.annual_kits().values())
 
     @property
     def run_min(self) -> float:
