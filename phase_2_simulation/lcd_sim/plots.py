@@ -362,18 +362,21 @@ def plot_throughput(res):
     f["Week"] = ((f.Done - res.scenario.warmup_min) // MIN_PER_WEEK).astype(int) + 1
     tab = f.pivot_table(index="Week", columns="Model", values="Part", aggfunc="count",
                         fill_value=0).reindex(columns=MODELS, fill_value=0)
-    fig, ax = plt.subplots(figsize=(9, 3.2))
-    bottom = np.zeros(len(tab))
-    for m in MODELS:
-        ax.bar(tab.index, tab[m], bottom=bottom, color=MODEL_COLOR[m], label=m, edgecolor=SURFACE, width=0.7)
-        bottom += tab[m].values
-    dem = res.throughput.loc["Total", "Demand per week"]
-    ax.axhline(dem, color=INK, ls="--", lw=1)
-    ax.text(tab.index.max() + 0.45, dem, f"demand {dem:,.0f}/wk", va="bottom", ha="right", fontsize=8)
-    ax.set_xlabel("Week (after warm-up)"), ax.set_ylabel("Finished units")
-    ax.set_xticks(tab.index), ax.grid(axis="x", visible=False)
-    ax.set_title("Weekly good output vs demand", loc="left", pad=22)
-    ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=3)
+    fig, axes = plt.subplots(1, len(MODELS), figsize=(11, 3.4), sharey=True)
+    ymax = max(tab.values.max(), res.throughput.loc[list(MODELS), "Demand per week"].max()) * 1.15
+    for ax, m in zip(axes, MODELS):
+        ax.bar(tab.index, tab[m], color=MODEL_COLOR[m], edgecolor=SURFACE, width=0.7)
+        dem = res.throughput.loc[m, "Demand per week"]
+        ax.axhline(dem, color=INK, ls="--", lw=1)
+        ax.set_xticks(tab.index), ax.grid(axis="x", visible=False)
+        ax.set_ylim(0, ymax)
+        ax.set_xlabel("Week (after warm-up)")
+        ax.set_title(m, loc="left", color=MODEL_COLOR[m])
+        ax.set_title(f"mean {tab[m].mean():,.0f}  ·  demand {dem:,.0f} /wk (--)", loc="right",
+                     fontsize=8, fontweight="normal", color=INK2)
+    axes[0].set_ylabel("Finished units")
+    fig.suptitle("Weekly good output vs demand, by model", x=0.01, ha="left",
+                 fontsize=11, fontweight="bold", color=INK)
     fig.tight_layout()
     return fig
 

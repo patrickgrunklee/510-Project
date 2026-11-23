@@ -36,6 +36,8 @@ reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_
 | `lcd_sim/plots.py` | Charts: wave levels (daily stacked queue bars by model), WIP, resource states, utilization vs Phase 1, operator Gantt and heatmap, scrap Pareto, precedence block diagram. |
 | `lcd_sim/experiments.py` | Scenario comparisons: maintenance, operator sweep, capacity what-ifs, Years 1–3. |
 | `lcd_simulation.ipynb` | The working notebook. |
+| `phase2_assumptions_simulation.ipynb` | Executed simulation of `phase2_assumptions.md`: station-wide setup teams, mixed products, and ten-replication policy comparisons. |
+| `phase2_assumptions_comparison.csv` | Mean KPIs exported by the assumptions notebook. |
 
 ## Scenario switches (`get_scenario(year, ...)`)
 | Switch | Default | What it does |
@@ -43,18 +45,21 @@ reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_
 | `machines={"9-M": 7}` | Phase 1 count | Override the number of machines at a station. |
 | `operators={"Fab": 8}` | Phase 1 crew | Override the crew per shift for a cell. |
 | `run_weeks`, `warmup_weeks` | 8, 2 | Run length and warm-up. |
+| `release_mode` | `"continuous"` | `"continuous"`: evenly spaced kits in product runs with lot gates. `"batch"`: whole-lot arrivals. `"cyclic"`: M860 → M970 → M1080 one kit at a time, global FIFO station queues, and no lot gates. |
 | `seed` | 1 | Random seed. |
 | `scrap_on`, `scrap_scale` | True, 1.0 | Turn scrap on or off. `scrap_scale=0.5` models SPC. |
 | `failures_on`, `pm_on` | True, True | Breakdowns and planned maintenance. |
 | `failure_mode` | `"count"` | `"count"` = every N parts. `"time"` = EXPO(MTBF) wall-clock. |
 | `tqm` | False | Cuts repair and PM time by 75%. |
-| `setup_scope` | `"machine"` | `"machine"` = every machine sets up for a new lot. `"station"` = one setup per lot per station (the Phase 1 RCA convention). |
+| `setup_scope` | `"machine"` | `"machine"`: setup when an individual machine changes model. `"station"`: Phase 1 one-setup convention with lot gates. `"workcell"`: station-group team setup once per product lot, with mixed cyclic arrivals. |
+| `setup_crew` | `{}` | For `setup_scope="workcell"`, operators reserved per station, defaulting to machine count. Example: `{"5-A": 3}`. Elapsed setup = machine count × effective setup time / crew. Crew cannot exceed the cell pool. |
 | `op_priority={"1-M": -1}` | none | Seize priority for operators. A lower number is served first. |
 | `repair_uses_operator` | False | Repairs and PM tie up a line operator. |
 | `move_time` | 0 | Minutes to move a part between stations (material handling). |
 
 ## Modeling assumptions (to confirm)
 1. **Process times are deterministic.** Each part's time is (load + cycle × learning + unload) / efficiency. Setup / efficiency is charged when a machine starts a lot of a different model. Learning is 0.99^(year−1).
+   Setup inputs at 3-A, 4-A, 5-A, 8-A, and 11-A are 25% of the original project values (a 75% reduction) for every model.
 2. **Flow follows the precedence diagram.**
    - A lot launches `ceil(EOQ × f₁₋ₘ)` component kits at 1-M.
    - **After 1-M** the kit separates into a keyboard (→ 4-A) and an LCD/PCB set (→ 2-M).
@@ -73,12 +78,20 @@ reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_
    - Manual benches hold the operator for setup and the whole cycle.
    - Automatic machines hold the operator only for setup, load and unload.
 7. **Only productive time is simulated** (2 × 7.5 h shifts, 5 days, 50 weeks, so 4,500 min/week). WIP carries over between shifts.
-8. **Lots are released at even intervals** across the year in a smooth mixed-model sequence.
+8. **Kits arrive one at a time** at a constant interval based on planned annual kit volume (about 1.020 productive minutes in Year 3). Product runs retain their EOQ quantities and mixed-model lot sequence. The next run starts after the previous run's last kit arrival plus one interval; it does not wait for downstream completion. `release_mode="batch"` restores whole-lot releases at even intervals. No WIP cap is imposed.
+   Part flow time starts at its individual kit arrival. Split components inherit that timestamp; a matched assembly uses the oldest constituent kit's timestamp. Lot flow time still starts at the first kit in the lot.
 9. **Buffers are unbounded** (no blocking) and moves are instantaneous by default.
 10. **Planned yields** (EOQ / kits) are 78.3% / 85.3% / 83.5%, the same as in the Phase 1 report. Because scrap is random, a lot can fall a few units short of EOQ (on average lots deliver 99.4% of EOQ).
 
+## Experiment 2: single-unit product rotation
+Notebook section 15 uses `get_scenario(3, release_mode="cyclic")`. One kit arrives every 1.020 productive minutes, in strict M860/M970/M1080 order. This keeps the total kit arrival rate but changes the arrival mix to equal thirds. Demand targets are unchanged.
+
+Stations serve arrived units FIFO across all products. Parallel machines may process different products simultaneously; an idle machine already configured for the next unit's model is preferred. Every machine pays the destination model's setup time whenever its model changes, including the first setup. The existing zero setup inputs and 75% reductions still apply. There is no resequencing to form product batches and no WIP cap.
+
+Per-model EOQ groups remain only as scrap-planning and component-matching records: matching units assemble as soon as components are available within their record, with no wait for the whole group. These records impose no arrival or station gates. They preserve the existing split quantities and surplus accounting. Growing WIP under the unbounded arrival policy indicates overload; an eight-week average then describes that window, not steady state.
+
 ## Validation
-In the notebook (section 8), the model runs with failures and PM off and with `setup_scope="station"`. Under those settings:
+In the notebook (section 8), the historical Phase 1 check runs with whole-lot arrivals (`release_mode="batch"`), failures and PM off, and `setup_scope="station"`. Under those settings:
 - **Year 3** station utilizations match Phase 1 Table 2.3.1 within ±1.2 points.
 - **Lots** deliver about EOQ good units.
 - **Accounting:** there are zero lot-integrity violations, and every closed lot has nothing left owed at any station.

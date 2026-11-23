@@ -107,19 +107,22 @@ class OperatorPool:
         self.env, self.available = env, deque(ops)
         self.queue, self._seq = [], itertools.count()
 
-    def get(self, priority=0):
+    def get(self, priority=0, count=1):
         ev = self.env.event()
-        if self.available and not self.queue:
-            ev.succeed(self.available.popleft())
-        else:
-            heapq.heappush(self.queue, (priority, next(self._seq), ev))
+        heapq.heappush(self.queue, (priority, next(self._seq), count, ev))
+        self._dispatch()
         return ev
 
     def put(self, op):
-        if self.queue:
-            heapq.heappop(self.queue)[2].succeed(op)
-        else:
-            self.available.append(op)
+        self.available.append(op)
+        self._dispatch()
+
+    def _dispatch(self):
+        # Acquire setup teams atomically: partial crews must never hold operators.
+        while self.queue and len(self.available) >= self.queue[0][2]:
+            _, _, count, ev = heapq.heappop(self.queue)
+            ops = [self.available.popleft() for _ in range(count)]
+            ev.succeed(ops[0] if count == 1 else ops)
 
 
 class Operator:
@@ -163,6 +166,8 @@ class Station:
         self.lot_violations = 0                 # >0 would mean two lots at once
         self.last_lot_id = None
         self.setup_lot = None
+        self.prepared_lots = set()
+        self.group_setup_active = False
         # statistics
         self.q = TimeWeighted(self.env)         # parts waiting (all)
         self.q_gate = TimeWeighted(self.env)    # parts waiting behind the lot gate
@@ -170,6 +175,7 @@ class Station:
         self.reset_counters()
 
     def reset_counters(self):
+        self.group_setups = 0
         self.processed = 0
         self.wait_total = 0.0          # queue wait (arrive -> machine)
         self.op_wait_total = 0.0       # time holding a machine waiting for operator
@@ -197,6 +203,46 @@ class Station:
         return ev
 
     def dispatch(self):
+        if self.sim.sc.release_mode == "cyclic":
+            if self.group_setup_active:
+                return
+            # Global FIFO among arrived units; machines may run different models together.
+            while self.idle and self.waiting:
+                lid = min(self.waiting, key=lambda k: (self.waiting[k][0][2],
+                                                       self.waiting[k][0][0].id))
+                dq = self.waiting[lid]
+                next_part = dq[0][0]
+                if self.sim.sc.setup_scope == "workcell" and lid not in self.prepared_lots:
+                    t = self.sim.sc.op_times(next_part.model, self.name)["setup"]
+                    if t == 0:
+                        self.prepared_lots.add(lid)
+                    else:
+                        # Drain current work and maintenance before reserving the whole group.
+                        if self.in_process or len(self.idle) != len(self.machines):
+                            return
+                        self.group_setup_active = True
+                        self.idle.clear()
+                        for m in self.machines:
+                            m.set_state("WaitOp")
+                        self.env.process(self.sim.setup_workcell(self, next_part))
+                        return
+                part, ev, t = dq.popleft()
+                if not dq:
+                    del self.waiting[lid]
+                lot = part.lot
+                m = self._pick_machine(lot)
+                self.idle.remove(m)
+                m.set_state("WaitOp")
+                if lot.id != self.last_lot_id:
+                    self.last_lot_id = lot.id
+                    self.lots_started += 1
+                self.in_process[lot.id] += 1
+                self.q.add(-1)
+                self.wait_total += self.env.now - t
+                ev.succeed(m)
+            self.q_gate.update(0)
+            self.gate_blocked.update(0)
+            return
         lot = self.current_lot()
         if lot is not None:
             dq = self.waiting.get(lot.id)
@@ -315,8 +361,23 @@ class LCDPlant:
         return [m for _, _, m in sorted(pos)]
 
     def release(self):
+        if self.sc.release_mode == "cyclic":
+            # EOQ groups remain accounting/matching containers, never release or station gates.
+            active, left = {}, {}
+            for model in itertools.cycle(MODELS):
+                if left.get(model, 0) == 0:
+                    plan = self.plans[model]
+                    active[model] = Lot(model, plan, self.sc.eoq[model][0],
+                                        self.env.now, self.routes[model])
+                    self.lots.append(active[model])
+                    left[model] = plan["KIT"]
+                self.spawn(active[model], "KIT")
+                left[model] -= 1
+                yield self.env.timeout(self.sc.kit_interarrival_min)
+            return
         seq = self.lot_sequence()
         interval = MIN_PER_YEAR / len(seq)
+        kit_interval = self.sc.kit_interarrival_min
         for model in itertools.cycle(seq):
             plan = self.plans[model]
             lot = Lot(model, plan, self.sc.eoq[model][0], self.env.now, self.routes[model])
@@ -325,14 +386,41 @@ class LCDPlant:
                 self.stations[ws].lot_seq.append(lot)
             for _ in range(plan["KIT"]):
                 self.spawn(lot, "KIT")
-            yield self.env.timeout(interval)
+                if self.sc.release_mode == "continuous":
+                    yield self.env.timeout(kit_interval)
+            if self.sc.release_mode == "batch":
+                yield self.env.timeout(interval)
 
-    def spawn(self, lot, seg, invested=0.0, labor=0.0):
+    def spawn(self, lot, seg, invested=0.0, labor=0.0, t_release=None):
         self.wip.add(1)
-        p = Part(next(self.part_ids), lot, seg, lot.release_time, invested, labor)
+        p = Part(next(self.part_ids), lot, seg,
+                 self.env.now if t_release is None else t_release, invested, labor)
         self.env.process(self.part_flow(p))
 
     # ------------------------------------------------------------ operators
+    def setup_workcell(self, st, part):
+        """One station-wide setup per product lot, with an atomic operator team."""
+        crew = self.sc.setup_crew.get(st.name, len(st.machines))
+        ops = yield self.pools[st.cell].get(self.sc.op_priority.get(st.name, 0), crew)
+        ops = [ops] if crew == 1 else ops
+        self.ops_busy[st.cell].add(crew)
+        start = self.env.now
+        for m in st.machines:
+            m.set_state("Setup")
+        duration = len(st.machines) * self.sc.op_times(part.model, st.name)["setup"] / crew
+        yield self.env.timeout(duration)
+        if self.env.now >= self.stat_start:
+            st.group_setups += 1
+        for op in ops:
+            self.put_op(op, st.name, f"{st.name} group", "setup", part, start)
+        st.prepared_lots.add(part.lot.id)
+        for m in st.machines:
+            m.setups += 1
+            m.set_state("Idle")
+            st.idle.append(m)
+        st.group_setup_active = False
+        st.dispatch()
+
     def get_op(self, cell, ws=None):
         op = yield self.pools[cell].get(self.sc.op_priority.get(ws, 0) if ws else 0)
         self.ops_busy[cell].add(1)
@@ -374,7 +462,7 @@ class LCDPlant:
             if m.lot_id != lot.id:
                 first = st.setup_lot != lot.id       # first machine at this station for the lot
                 st.setup_lot = lot.id
-                if m.last_model != model and t["setup"] > 0 and \
+                if sc.setup_scope != "workcell" and m.last_model != model and t["setup"] > 0 and \
                         (sc.setup_scope == "machine" or first):
                     m.set_state("Setup")
                     s0 = env.now
@@ -435,7 +523,7 @@ class LCDPlant:
             for c in SEG_CHILDREN[seg]:
                 if lot.sent[c] < lot.plan[c]:
                     lot.sent[c] += 1
-                    self.spawn(lot, c, part.invested_min, part.labor_cost)
+                    self.spawn(lot, c, part.invested_min, part.labor_cost, part.t_release)
                 else:
                     lot.spare[c] += 1                   # component not needed
         elif seg in MERGE_INPUTS:                       # wait in the match queue
@@ -453,7 +541,8 @@ class LCDPlant:
             items = [b[s].pop() for s in MERGE_INPUTS]
             lot.sent["ASM"] += 1
             self.wip.add(-len(items))
-            self.spawn(lot, "ASM", sum(i.invested_min for i in items), sum(i.labor_cost for i in items))
+            self.spawn(lot, "ASM", sum(i.invested_min for i in items),
+                       sum(i.labor_cost for i in items), min(i.t_release for i in items))
 
     def item_end(self, lot, seg):
         lot.remaining[seg] -= 1

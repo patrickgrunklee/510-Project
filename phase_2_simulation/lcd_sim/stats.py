@@ -96,6 +96,7 @@ def collect(p) -> SimResult:
             "Spare capacity %": 1 - thr_hr / cap_hr,
             "Available machine-hr": n * T / 60,
             "Setups": int(mm["Setups"].sum()), "Failures": int(mm["Failures"].sum()),
+            "Group setups": st.group_setups,
             "PMs": int(mm["PMs"].sum()), "Lots started": st.lots_started,
             "Lot violations": st.lot_violations,
         })

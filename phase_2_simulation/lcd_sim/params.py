@@ -41,25 +41,26 @@ CELLS = ["Fab", "Asm"]
 
 # ---------------------------------------------------------------- routing
 # (setup, cycle, load, unload) in minutes; transfer batch = 1 everywhere.
+# Setup times at 3-A, 4-A, 5-A, 8-A, and 11-A include a 75% reduction.
 # cycle == 0 means the model does not visit the station (7-M for M970/M1080).
 _R = {
     "M860": {
-        "1-M": (15, 1.6, 0, 0),   "2-M": (20, 1.1, 0, 0),   "3-A": (5, 0.4, 0.1, 0.1),
-        "4-A": (8, 0.6, 0.2, 0.2), "5-A": (15, 1.5, 1.0, 0.2), "6-A": (10, 1.0, 0.1, 0.1),
-        "7-M": (12, 0.8, 0.2, 0.2), "8-A": (10, 0.9, 0.2, 0.2), "9-M": (5, 3.2, 0, 0),
-        "10-M": (5, 2.9, 0, 0),   "11-A": (10, 1.3, 0.2, 0.2), "12-M": (5, 1.5, 0, 0),
+        "1-M": (15, 1.6, 0, 0),   "2-M": (20, 1.1, 0, 0),   "3-A": (1.25, 0.4, 0.1, 0.1),
+        "4-A": (2, 0.6, 0.2, 0.2), "5-A": (3.75, 1.5, 1.0, 0.2), "6-A": (10, 1.0, 0.1, 0.1),
+        "7-M": (12, 0.8, 0.2, 0.2), "8-A": (2.5, 0.9, 0.2, 0.2), "9-M": (5, 3.2, 0, 0),
+        "10-M": (5, 2.9, 0, 0),   "11-A": (2.5, 1.3, 0.2, 0.2), "12-M": (5, 1.5, 0, 0),
     },
     "M970": {
-        "1-M": (0, 1.7, 0, 0),    "2-M": (0, 1.5, 0, 0),    "3-A": (10, 1.3, 0.1, 0.1),
-        "4-A": (10, 0.3, 0.1, 0.1), "5-A": (60, 5.3, 0.8, 0.4), "6-A": (0, 1.7, 0.1, 0.1),
-        "7-M": (0, 0, 0, 0),      "8-A": (10, 1.1, 0.2, 0.2), "9-M": (0, 6.9, 0, 0),
-        "10-M": (0, 5.7, 0, 0),   "11-A": (10, 1.2, 0.2, 0.2), "12-M": (0, 1.5, 0, 0),
+        "1-M": (0, 1.7, 0, 0),    "2-M": (0, 1.5, 0, 0),    "3-A": (2.5, 1.3, 0.1, 0.1),
+        "4-A": (2.5, 0.3, 0.1, 0.1), "5-A": (15, 5.3, 0.8, 0.4), "6-A": (0, 1.7, 0.1, 0.1),
+        "7-M": (0, 0, 0, 0),      "8-A": (2.5, 1.1, 0.2, 0.2), "9-M": (0, 6.9, 0, 0),
+        "10-M": (0, 5.7, 0, 0),   "11-A": (2.5, 1.2, 0.2, 0.2), "12-M": (0, 1.5, 0, 0),
     },
     "M1080": {
-        "1-M": (0, 2.1, 0, 0),    "2-M": (0, 1.6, 0, 0),    "3-A": (12, 1.5, 0.2, 0.1),
-        "4-A": (14, 0.4, 0.2, 0.1), "5-A": (65, 6.1, 0.8, 0.4), "6-A": (0, 2.9, 0.2, 0.1),
-        "7-M": (0, 0, 0, 0),      "8-A": (15, 1.5, 0.3, 0.2), "9-M": (0, 8.2, 0, 0),
-        "10-M": (0, 6.0, 0, 0),   "11-A": (15, 1.3, 0.3, 0.2), "12-M": (0, 1.6, 0, 0),
+        "1-M": (0, 2.1, 0, 0),    "2-M": (0, 1.6, 0, 0),    "3-A": (3, 1.5, 0.2, 0.1),
+        "4-A": (3.5, 0.4, 0.2, 0.1), "5-A": (16.25, 6.1, 0.8, 0.4), "6-A": (0, 2.9, 0.2, 0.1),
+        "7-M": (0, 0, 0, 0),      "8-A": (3.75, 1.5, 0.3, 0.2), "9-M": (0, 8.2, 0, 0),
+        "10-M": (0, 6.0, 0, 0),   "11-A": (3.75, 1.3, 0.3, 0.2), "12-M": (0, 1.6, 0, 0),
     },
 }
 ROUTING = {m: {ws: dict(zip(("setup", "cycle", "load", "unload"), v))
@@ -198,15 +199,36 @@ class Scenario:
     tqm_factor: float = 0.25
     repair_uses_operator: bool = False     # repairs/PM by maintenance, not line operators
     move_time: float = 0.0                 # min to move a part between stations
+    release_mode: str = "continuous"      # "batch", "continuous" product runs, or "cyclic" 1-2-3
     setup_scope: str = "machine"           # "machine": every machine sets up for a new lot
                                            # "station": one setup per lot per station (Phase 1 RCA)
     op_priority: dict = field(default_factory=dict)  # ws -> priority (lower = served first)
+    setup_crew: dict = field(default_factory=dict)   # workcell setup crew by station; default machine count
 
     def __post_init__(self):
+        if self.release_mode not in ("continuous", "batch", "cyclic"):
+            raise ValueError("release_mode must be 'continuous', 'batch', or 'cyclic'")
+        if self.setup_scope not in ("machine", "station", "workcell"):
+            raise ValueError("setup_scope must be 'machine', 'station', or 'workcell'")
+        if self.release_mode == "cyclic" and self.setup_scope == "station":
+            raise ValueError("Cyclic dispatch requires machine or workcell setups")
+        if self.setup_scope == "workcell":
+            if self.release_mode != "cyclic":
+                raise ValueError("Workcell setup experiment requires cyclic mixed-product arrivals")
+            for ws, count in self.machines.items():
+                crew = self.setup_crew.get(ws, count)
+                if not isinstance(crew, int) or not 1 <= crew <= self.operators[STATION_INFO[ws]["cell"]]:
+                    raise ValueError(f"Invalid setup crew at {ws}: {crew}")
         if self.learning is None:
             self.learning = 0.99 ** max(self.year - 1, 0)
 
     # derived ------------------------------------------------------------
+    @property
+    def kit_interarrival_min(self) -> float:
+        """Constant kit spacing preserving the planned annual kit volume and mix."""
+        annual_kits = sum(self.launch_qty(m) * self.eoq[m][1] for m in MODELS)
+        return MIN_PER_YEAR / annual_kits
+
     @property
     def run_min(self) -> float:
         return self.run_weeks * MIN_PER_WEEK
