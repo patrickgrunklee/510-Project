@@ -64,6 +64,8 @@ def collect(p) -> SimResult:
         for m in st.machines:
             row = dict(Station=ws, Machine=m.name)
             row.update({f"{s} %": m.state_time[s] / T for s in MACHINE_STATES})
+            row["Scheduled (hr)"] = T / 60
+            row.update({f"{s} (hr)": m.state_time[s] / 60 for s in MACHINE_STATES})
             row["Utilization"] = (m.state_time["Busy"] + m.state_time["Setup"]) / T
             row.update(Units=m.units, Setups=m.setups, Failures=m.failures, PMs=m.pms)
             mrows.append(row)
@@ -95,6 +97,8 @@ def collect(p) -> SimResult:
             "Capacity used %": thr_hr / cap_hr,
             "Spare capacity %": 1 - thr_hr / cap_hr,
             "Available machine-hr": n * T / 60,
+            "Scheduled machine-hr": n * T / 60,
+            **{f"{state} machine-hr": mm[f"{state} (hr)"].sum() for state in MACHINE_STATES},
             "Setups": int(mm["Setups"].sum()), "Failures": int(mm["Failures"].sum()),
             "Group setups": st.group_setups,
             "PMs": int(mm["PMs"].sum()), "Lots started": st.lots_started,
@@ -118,6 +122,9 @@ def collect(p) -> SimResult:
         crew = sc.operators[c]
         cst = stations[stations.Cell == c]
         crow.append({"Cell": c, "Crew per shift": crew,
+                     "Scheduled labor-hr": crew * T / 60,
+                     "Busy labor-hr": p.ops_busy[c].mean() * T / 60,
+                     "Idle labor-hr": (crew - p.ops_busy[c].mean()) * T / 60,
                      "Avg busy": p.ops_busy[c].mean(), "Peak busy": p.ops_busy[c].max,
                      "Utilization": p.ops_busy[c].mean() / crew,
                      "Avg WIP in cell": p.cell_wip[c].mean(),

@@ -41,14 +41,14 @@ CELLS = ["Fab", "Asm"]
 
 # ---------------------------------------------------------------- routing
 # (setup, cycle, load, unload) in minutes; transfer batch = 1 everywhere.
-# Setup times at 3-A, 4-A, 5-A, 8-A, and 11-A include a 75% reduction.
+# Setup times at every station include a 75% reduction from original inputs.
 # cycle == 0 means the model does not visit the station (7-M for M970/M1080).
 _R = {
     "M860": {
-        "1-M": (15, 1.6, 0, 0),   "2-M": (20, 1.1, 0, 0),   "3-A": (1.25, 0.4, 0.1, 0.1),
-        "4-A": (2, 0.6, 0.2, 0.2), "5-A": (3.75, 1.5, 1.0, 0.2), "6-A": (10, 1.0, 0.1, 0.1),
-        "7-M": (12, 0.8, 0.2, 0.2), "8-A": (2.5, 0.9, 0.2, 0.2), "9-M": (5, 3.2, 0, 0),
-        "10-M": (5, 2.9, 0, 0),   "11-A": (2.5, 1.3, 0.2, 0.2), "12-M": (5, 1.5, 0, 0),
+        "1-M": (3.75, 1.6, 0, 0),   "2-M": (5, 1.1, 0, 0),   "3-A": (1.25, 0.4, 0.1, 0.1),
+        "4-A": (2, 0.6, 0.2, 0.2), "5-A": (3.75, 1.5, 1.0, 0.2), "6-A": (2.5, 1.0, 0.1, 0.1),
+        "7-M": (3, 0.8, 0.2, 0.2), "8-A": (2.5, 0.9, 0.2, 0.2), "9-M": (1.25, 3.2, 0, 0),
+        "10-M": (1.25, 2.9, 0, 0),   "11-A": (2.5, 1.3, 0.2, 0.2), "12-M": (1.25, 1.5, 0, 0),
     },
     "M970": {
         "1-M": (0, 1.7, 0, 0),    "2-M": (0, 1.5, 0, 0),    "3-A": (2.5, 1.3, 0.1, 0.1),
@@ -191,7 +191,7 @@ class Scenario:
     # behaviour switches
     learning: float | None = None          # run-time factor; default 0.99**(year-1)
     scrap_on: bool = True
-    scrap_scale: float = 1.0               # 0.5 = SPC (-50% scrap)
+    scrap_scale: float = 1.0               # 0.25 = SPC in both cells (-75% scrap)
     failures_on: bool = True               # breakdowns
     pm_on: bool = True                     # planned maintenance
     failure_mode: str = "count"            # "count" (per part) or "time" (EXPO(MTBF))

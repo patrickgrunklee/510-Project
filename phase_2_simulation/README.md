@@ -47,7 +47,7 @@ reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_
 | `run_weeks`, `warmup_weeks` | 8, 2 | Run length and warm-up. |
 | `release_mode` | `"continuous"` | `"continuous"`: evenly spaced kits in product runs with lot gates. `"batch"`: whole-lot arrivals. `"cyclic"`: M860 → M970 → M1080 one kit at a time, global FIFO station queues, and no lot gates. `"heijunka"`: like `"cyclic"`, but the model order is a deterministic level sequence weighted by planned kit volume (see Experiment 3). |
 | `seed` | 1 | Random seed. |
-| `scrap_on`, `scrap_scale` | True, 1.0 | Turn scrap on or off. `scrap_scale=0.5` models SPC. |
+| `scrap_on`, `scrap_scale` | True, 1.0 | Turn scrap on or off. The assumptions notebook uses `scrap_scale=0.25` for SPC in both cells (75% lower scrap probabilities). Scrap allowances and kit arrival spacing are recalculated. |
 | `failures_on`, `pm_on` | True, True | Breakdowns and planned maintenance. |
 | `failure_mode` | `"count"` | `"count"` = every N parts. `"time"` = EXPO(MTBF) wall-clock. |
 | `tqm` | False | Cuts repair and PM time by 75%. |
@@ -59,7 +59,7 @@ reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_
 
 ## Modeling assumptions (to confirm)
 1. **Process times are deterministic.** Each part's time is (load + cycle × learning + unload) / efficiency. Setup / efficiency is charged when a machine starts a lot of a different model. Learning is 0.99^(year−1).
-   Setup inputs at 3-A, 4-A, 5-A, 8-A, and 11-A are 25% of the original project values (a 75% reduction) for every model.
+   Setup inputs at every station are 25% of the original project values (a 75% reduction) for every model. Zero setup inputs remain zero. The earlier reductions at 3-A, 4-A, 5-A, 8-A, and 11-A have not been applied a second time.
 2. **Flow follows the precedence diagram.**
    - A lot launches `ceil(EOQ × f₁₋ₘ)` component kits at 1-M.
    - **After 1-M** the kit separates into a keyboard (→ 4-A) and an LCD/PCB set (→ 2-M).
@@ -78,6 +78,7 @@ reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_
    - Manual benches hold the operator for setup and the whole cycle.
    - Automatic machines hold the operator only for setup, load and unload.
 7. **Only productive time is simulated** (2 × 7.5 h shifts, 5 days, 50 weeks, so 4,500 min/week). WIP carries over between shifts.
+   All machines and crew positions accrue scheduled hours for the complete horizon, independent of arrivals or finished output. The assumptions notebook separates scheduled labor into busy/idle hours and scheduled machine hours into all six machine states. Year 3 has 300 scheduled labor-hours and 510 scheduled machine-hours per productive day. Crew positions are staffed on both shifts; the same individual is not assumed to work both shifts. The current run remains production-plan paced rather than an unlimited-work capacity test.
 8. **Kits arrive one at a time** at a constant interval based on planned annual kit volume (about 1.020 productive minutes in Year 3). Product runs retain their EOQ quantities and mixed-model lot sequence. The next run starts after the previous run's last kit arrival plus one interval; it does not wait for downstream completion. `release_mode="batch"` restores whole-lot releases at even intervals. No WIP cap is imposed.
    Part flow time starts at its individual kit arrival. Split components inherit that timestamp; a matched assembly uses the oldest constituent kit's timestamp. Lot flow time still starts at the first kit in the lot.
 9. **Buffers are unbounded** (no blocking) and moves are instantaneous by default.
