@@ -15,7 +15,7 @@ import pandas as pd
 
 from .model import MACHINE_STATES, simulate
 from .params import (CELLS, MERGE_INPUTS, MIN_PER_WEEK, MODELS, PHASE1_UTIL, SEG_NAME, SEGMENTS,
-                     STATION_INFO, STATIONS, WEEKS_PER_YEAR, Scenario, visits)
+                     STATION_INFO, STATION_SEG, STATIONS, WEEKS_PER_YEAR, Scenario, visits)
 
 # two-sided 95% t critical values, df = 1..30
 _T95 = [12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179,
@@ -214,11 +214,19 @@ def collect(p) -> SimResult:
 
     # ---------------------------------------------------------- sanity checks
     done_lots = [l for l in p.lots if l.done_time is not None]
+
+    def unaccounted(l):
+        # A lot closes when its last planned assembly ends. If scrap ran below the
+        # allowance, surplus kits/components (future spares) may still be in process
+        # at that moment, or at the end of the run. Those are legitimate; a closed
+        # lot is wrong only if it still owes assemblies, has negative counts, or a
+        # station is owed more items than its segment still has in process.
+        return (l.remaining["ASM"] != 0 or any(v < 0 for v in l.remaining.values())
+                or any(v > l.remaining[STATION_SEG[ws]] for ws, v in l.owed.items()))
+
     checks = {
         "lot violations (must be 0)": int(stations["Lot violations"].sum()),
-        "closed lots with items still owed (must be 0)":
-            sum(any(v != 0 for v in l.owed.values()) or any(v != 0 for v in l.remaining.values())
-                for l in done_lots),
+        "closed lots with items still owed (must be 0)": sum(unaccounted(l) for l in done_lots),
         "negative owed counts (must be 0)": sum(v < 0 for l in p.lots for v in l.owed.values()),
         "finished > EOQ x plan (must be 0)": sum(l.finished > l.plan["ASM"] for l in p.lots),
         "max operator utilization (<= 1)": float(operators.Utilization.max()) if len(operators) else 0,
