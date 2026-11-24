@@ -1,0 +1,6 @@
+# Python bytecode (regenerated on every run; causes merge conflicts)
+__pycache__/
+*.py[cod]
+
+# Jupyter autosave
+.ipynb_checkpoints/
