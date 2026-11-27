@@ -414,12 +414,15 @@ def flow_time_spc(res):
     return pd.concat(out, ignore_index=True)
 
 
-def plot_flow_time_spc(res, log=True):
+def plot_flow_time_spc(res, log=True, zoom=False):
     """Individuals control chart of display flow time per model, with Western Electric rule signals.
 
     log=True puts the y axis on a log scale so the control band stays readable next to
     the long flow-time tail (limits and rules are still computed on the raw hours).
+    zoom=True uses a linear axis fitted tightly to the data and control limits (for runs with
+    very little variation); it overrides log.
     """
+    log = log and not zoom
     spc = flow_time_spc(res)
     fig, axes = plt.subplots(len(MODELS), 1, figsize=(13, 2.9 * len(MODELS)), sharex=True)
     for ax, m in zip(np.atleast_1d(axes), MODELS):
@@ -438,7 +441,7 @@ def plot_flow_time_spc(res, log=True):
             if log and y <= 0:
                 continue
             ax.axhline(y, color=INK if ls == "--" else INK2, ls=ls, lw=0.9, zorder=5)
-            ax.text(1.0, y, f" {lab} {y:.2f}", transform=ax.get_yaxis_transform(),
+            ax.text(1.0, y, f" {lab} {y:.{3 if zoom else 2}f}", transform=ax.get_yaxis_transform(),
                     va="center", fontsize=7, color=INK2, clip_on=False)
         for v in np.arange(MIN_PER_WEEK / 60, d.Hour.max(), MIN_PER_WEEK / 60):
             ax.axvline(v, color=AXIS, lw=0.7, zorder=1)
@@ -447,6 +450,11 @@ def plot_flow_time_spc(res, log=True):
             ax.set_ylim(min(d.x.min(), lcl if lcl > 0 else d.x.min()) * 0.8, d.x.max() * 1.3)
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
             ax.yaxis.set_minor_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}" if f"{v:g}"[0] in "1235" else ""))
+        elif zoom:
+            lo_y, hi_y = min(d.x.min(), lcl), max(d.x.max(), cl + 3 * sg)
+            pad = max(hi_y - lo_y, 1e-3) * 0.08
+            ax.set_ylim(lo_y - pad, hi_y + pad)
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.3f}"))
         else:
             ax.set_ylim(0, d.x.quantile(0.999) * 1.05)
         ax.set_ylabel("Flow time (hr, log)" if log else "Flow time (hr)")
