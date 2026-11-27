@@ -205,6 +205,13 @@ class Scenario:
                                            # "station": one setup per lot per station (Phase 1 RCA)
     op_priority: dict = field(default_factory=dict)  # ws -> priority (lower = served first)
     setup_crew: dict = field(default_factory=dict)   # workcell setup crew by station; default machine count
+    setups_on: bool = True                 # False = zero changeover time everywhere (what-if)
+    setup_staggered: bool = True           # workcell: each machine sets up for a new lot on its own when it
+                                           # frees up (1 operator, per-machine setup time), then resumes at once;
+                                           # False = whole-station group setup after every machine is idle
+    kit_pull: bool = True                  # cyclic/heijunka: build keyboards/backlights only when their branch
+                                           # is behind the power-strip branch of the same model (else spare)
+    pull_margin: int = 0                   # extra keyboards/backlights allowed ahead of power strips
 
     def __post_init__(self):
         if self.release_mode not in ("continuous", "batch", "cyclic", "heijunka"):
@@ -315,7 +322,7 @@ class Scenario:
         """Effective task times (min) for one part, efficiency + learning applied."""
         r = ROUTING[model][ws]
         eff = STATION_INFO[ws]["eff"]
-        return dict(setup=r["setup"] / eff, load=r["load"] / eff,
+        return dict(setup=r["setup"] / eff if self.setups_on else 0.0, load=r["load"] / eff,
                     cycle=r["cycle"] * self.learning / eff, unload=r["unload"] / eff)
 
     def time_per_part(self, model: str, ws: str) -> float:

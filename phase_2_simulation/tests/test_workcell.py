@@ -13,7 +13,7 @@ class IsolatedPlant(LCDPlant):
 class WorkcellSetupTests(unittest.TestCase):
     def plant(self, crew=None):
         sc = get_scenario(3, release_mode="cyclic", setup_scope="workcell",
-                          setup_crew={} if crew is None else {"5-A": crew},
+                          setup_crew={} if crew is None else {"5-A": crew}, setup_staggered=False,
                           warmup_weeks=0, keep_logs=True,
                           failures_on=False, pm_on=False)
         return IsolatedPlant(sc)
@@ -91,6 +91,31 @@ class WorkcellSetupTests(unittest.TestCase):
     def test_oversized_crew_is_rejected(self):
         with self.assertRaises(ValueError):
             self.plant(8)
+
+
+
+class StaggeredSetupTests(unittest.TestCase):
+    """setup_staggered=True: each machine sets up on its own with one operator, no station-wide drain."""
+
+    def test_new_lot_does_not_wait_for_busy_or_failed_machines(self):
+        sc = get_scenario(3, release_mode="cyclic", setup_scope="workcell", setup_staggered=True,
+                          warmup_weeks=0, failures_on=False, pm_on=False)
+        plant = IsolatedPlant(sc)
+        st = plant.stations["5-A"]
+        old = Lot("M860", plant.plans["M860"], sc.eoq["M860"][0], 0, plant.routes["M860"])
+        new = Lot("M970", plant.plans["M970"], sc.eoq["M970"][0], 0, plant.routes["M970"])
+        self.assertTrue(st.arrive(Part(0, old, "PWR", 0)).triggered)   # one machine busy on the old lot
+        down = st.idle.pop()                                           # one machine down for repair
+        down.set_state("Failed")
+        self.assertTrue(st.arrive(Part(1, new, "PWR", 0)).triggered)   # a free machine takes the new lot now
+        self.assertFalse(st.group_setup_active)
+        self.assertEqual(st.group_setups, 0)
+
+    def test_full_run_uses_per_machine_setups(self):
+        from lcd_sim.stats import run
+        res = run(get_scenario(3, release_mode="heijunka", setup_scope="workcell", scrap_scale=0.25,
+                               keep_logs=False, run_weeks=2))
+        self.assertTrue(all(v == 0 for k, v in res.checks.items() if "must be 0" in k))
 
 
 if __name__ == "__main__":

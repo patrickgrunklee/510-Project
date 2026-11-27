@@ -7,7 +7,9 @@ Station/Route ->  Station (one per WS) + LCDPlant.part_flow()  (one segment of t
                   precedence diagram per entity)
 Separate      ->  after 1-M (keyboard / LCD-PCB) and 2-M (power strip / backlights);
                   each branch is sent ceil(EOQ x Phase 1 scrap factor) items
-Match/Batch   ->  one keyboard + power/PCB/LCD + backlight sub-assy of the same lot
+Match/Batch   ->  one keyboard + power/PCB/LCD + backlight sub-assy, oldest first (FIFO).
+                  Cyclic/heijunka unit flow: same MODEL, any lot (interchangeable parts) + kit pull.
+                  Lot-gated product runs: same LOT, leftovers counted unmatched at lot end.
                   -> one display assembly (before 7-M, or 8-A for M970/M1080)
 Seize/Release ->  Station.arrive()/release() (resource set of Machine objects)
                   + cell operator pools (OperatorPool, FIFO or priority like Arena Seize priority)
@@ -73,9 +75,10 @@ class Lot:
         self.sent = dict.fromkeys(plan, 0)
         self.sent["KIT"] = plan["KIT"]
         self.complete = set()
-        self.buffer = {s: [] for s in MERGE_INPUTS}   # match queue
+        self.in_pool = Counter()                  # this lot's sub-assys waiting in the model match pool
+        self.asm_closed = False                   # no more assemblies will be credited to this lot
         self.spare = Counter()                    # components not sent at a Separate (surplus)
-        self.unmatched = Counter()                # sub-assys left in the Match queue at lot end
+        self.unmatched = Counter()                # surplus matched sets sent to spare stock (no lot needed them)
         self.scrap = Counter()                    # scrapped items per segment
         self.finished = 0
         self.done_time = None
@@ -138,6 +141,7 @@ class Machine:
         self.state_time = dict.fromkeys(MACHINE_STATES, 0.0)
         self.last_model = None
         self.lot_id = None
+        self.prepared = set()                   # lots this machine is set up for (staggered workcell setup)
         self.since_pm = self.since_fail = 0
         self.fail_pending = False
         self.units = self.setups = self.failures = self.pms = 0
@@ -212,7 +216,8 @@ class Station:
                                                        self.waiting[k][0][0].id))
                 dq = self.waiting[lid]
                 next_part = dq[0][0]
-                if self.sim.sc.setup_scope == "workcell" and lid not in self.prepared_lots:
+                if self.sim.sc.setup_scope == "workcell" and not self.sim.sc.setup_staggered \
+                        and lid not in self.prepared_lots:
                     t = self.sim.sc.op_times(next_part.model, self.name)["setup"]
                     if t == 0:
                         self.prepared_lots.add(lid)
@@ -268,6 +273,9 @@ class Station:
         self.gate_blocked.update(1.0 if (self.idle and gated > 0) else 0.0)
 
     def _pick_machine(self, lot):
+        for m in self.idle:                       # already set up for this lot (staggered)
+            if lot.id in m.prepared:
+                return m
         for m in self.idle:                       # already running this lot
             if m.lot_id == lot.id:
                 return m
@@ -320,12 +328,23 @@ class LCDPlant:
         self.op_time = defaultdict(float)          # (operator, station) -> min (post warm-up)
         self.op_log = []                           # task rows (if keep_logs)
         self.scrap_log, self.done_log, self.lots = [], [], []
+        # Match pools: one FIFO queue per sub-assembly type, keyed by model (unit flow: lots
+        # share parts) or by lot (lot-gated product runs).
+        self.pooled = sc.unit_flow
+        self.match_pool = defaultdict(lambda: {s: deque() for s in MERGE_INPUTS})
+        self.pipe = Counter()                      # (model, seg) items in process or pooled (KB/DISP/PWR/BL)
+        self.lots_by_model = {m: [] for m in MODELS}
         self.trace = []
         self.part_ids = itertools.count(1)
         self.ubf = {ws: sc.units_between_failures(ws) for ws in STATIONS}
         self.routes = {m: route(m) for m in MODELS}
         self.seg_routes = {(m, g): seg_route(m, g) for m in MODELS for g in SEGMENTS}
         self.plans = {m: sc.segment_plan(m) for m in MODELS}
+        if sc.kit_pull and self.pooled:
+            # With pull, the balance rule (not a fixed per-lot quota) decides how many keyboards and
+            # backlights to build: every kit may supply one, unbuilt ones are kept as spares.
+            for plan in self.plans.values():
+                plan["KB"], plan["BL"] = plan["KIT"], plan["DISP"]
 
         self.env.process(self.release())
         self.env.process(self._warmup())
@@ -373,6 +392,7 @@ class LCDPlant:
                     active[model] = Lot(model, plan, self.sc.eoq[model][0],
                                         self.env.now, self.routes[model])
                     self.lots.append(active[model])
+                    self.lots_by_model[model].append(active[model])
                     left[model] = plan["KIT"]
                 self.spawn(active[model], "KIT")
                 left[model] -= 1
@@ -385,6 +405,7 @@ class LCDPlant:
             plan = self.plans[model]
             lot = Lot(model, plan, self.sc.eoq[model][0], self.env.now, self.routes[model])
             self.lots.append(lot)
+            self.lots_by_model[model].append(lot)
             for ws in self.routes[model]:
                 self.stations[ws].lot_seq.append(lot)
             for _ in range(plan["KIT"]):
@@ -398,6 +419,7 @@ class LCDPlant:
         self.wip.add(1)
         p = Part(next(self.part_ids), lot, seg,
                  self.env.now if t_release is None else t_release, invested, labor)
+        self.pipe[(lot.model, seg)] += 1
         self.env.process(self.part_flow(p))
 
     # ------------------------------------------------------------ operators
@@ -461,6 +483,15 @@ class LCDPlant:
             op = yield env.process(self.get_op(cell, ws))
             st.op_wait_total += env.now - t_req
             st.op_wait_n += 1
+            # staggered workcell setup: this machine alone sets up for a new lot, then runs at once
+            if sc.setup_scope == "workcell" and sc.setup_staggered and lot.id not in m.prepared:
+                m.prepared.add(lot.id)
+                if t["setup"] > 0:
+                    m.set_state("Setup")
+                    s0 = env.now
+                    yield env.timeout(t["setup"])
+                    m.setups += 1
+                    self.log_task(op, ws, m.name, "setup", part, s0)
             # setup when this machine changes model (once per machine per lot)
             if m.lot_id != lot.id:
                 first = st.setup_lot != lot.id       # first machine at this station for the lot
@@ -511,6 +542,7 @@ class LCDPlant:
                 for d in rte[i + 1:]:
                     self.stations[d].owed_done(lot)
                 self.wip.add(-1)
+                self.pipe[(model, part.seg)] -= 1
                 self.item_end(lot, part.seg)
                 return
             if sc.move_time:
@@ -523,29 +555,81 @@ class LCDPlant:
         lot, seg = part.lot, part.seg
         if seg in SEG_CHILDREN:                         # Separate
             self.wip.add(-1)
-            for c in SEG_CHILDREN[seg]:
-                if lot.sent[c] < lot.plan[c]:
+            self.pipe[(lot.model, seg)] -= 1
+            # power-strip side first, so the pull check below sees this kit's LCD/PCB set or power strip
+            for c in sorted(SEG_CHILDREN[seg], key=lambda c: c in ("KB", "BL")):
+                if lot.sent[c] < lot.plan[c] and self.pull_ok(lot.model, c):
                     lot.sent[c] += 1
                     self.spawn(lot, c, part.invested_min, part.labor_cost, part.t_release)
                 else:
                     lot.spare[c] += 1                   # component not needed
-        elif seg in MERGE_INPUTS:                       # wait in the match queue
-            lot.buffer[seg].append(part)
-            self.try_match(lot)
+        elif seg in MERGE_INPUTS:                       # wait in the model's match pool
+            key = lot.model if self.pooled else lot.id
+            self.match_pool[key][seg].append(part)
+            lot.in_pool[seg] += 1
+            self.try_match(key)
         else:                                           # finished display -> Dispose
             self.wip.add(-1)
             lot.finished += 1
             self.done_log.append((part.id, part.model, lot.id, part.t_release, self.env.now,
                                   part.invested_min, part.labor_cost))
 
-    def try_match(self, lot):
-        b = lot.buffer
-        while all(b[s] for s in MERGE_INPUTS) and lot.sent["ASM"] < lot.plan["ASM"]:
-            items = [b[s].pop() for s in MERGE_INPUTS]
+    def pull_ok(self, model, seg):
+        """Kit pull: build a keyboard/backlight only if its branch is not already ahead of the
+        power-strip branch (power strips + LCD/PCB sets still to split) by pull_margin."""
+        if not (self.sc.kit_pull and self.pooled) or seg not in ("KB", "BL"):
+            return True
+        pace = self.pipe[(model, "PWR")] + self.pipe[(model, "DISP")]
+        return self.pipe[(model, seg)] < pace + self.sc.pull_margin
+
+    def try_match(self, key):
+        """Match one keyboard + power + backlight sub-assy from one pool, oldest first.
+
+        Unit flow: sub-assemblies are interchangeable within a model, so all lots of a model
+        share one pool (key = model).  The display is credited to the lot of its power
+        sub-assy (the pacing branch), or the next open lot if that one is full; this keeps
+        every lot's planned assembly count and gate accounting intact.
+        Product runs: key = lot id, so only parts of the same lot are matched.
+        """
+        pool = self.match_pool[key]
+        while all(pool[s] for s in MERGE_INPUTS):
+            home = pool["PWR"][0].lot
+            lot = home if home.sent["ASM"] < home.plan["ASM"] else (
+                self.next_open_lot(home) if self.pooled else None)
+            if lot is None:                             # no lot of this model needs another display:
+                for s in MERGE_INPUTS:                  # the oldest complete set goes to spare stock
+                    i = pool[s].popleft()
+                    self.pipe[(i.model, s)] -= 1
+                    i.lot.in_pool[s] -= 1
+                    i.lot.unmatched[s] += 1
+                self.wip.add(-len(MERGE_INPUTS))
+                self.close_asm(home)
+                continue
+            items = [pool[s].popleft() for s in MERGE_INPUTS]   # FIFO: oldest sub-assembly first
+            for i in items:
+                i.lot.in_pool[i.seg] -= 1
+                self.pipe[(i.model, i.seg)] -= 1
             lot.sent["ASM"] += 1
+            if lot is not home:
+                self.close_asm(home)
             self.wip.add(-len(items))
             self.spawn(lot, "ASM", sum(i.invested_min for i in items),
                        sum(i.labor_cost for i in items), min(i.t_release for i in items))
+            self.close_asm(lot)
+
+    def next_open_lot(self, lot):
+        """Oldest later lot of the same model that still needs assemblies (surplus power sub-assys
+        carry forward instead of being scrapped, so the pooled keyboards/backlights do not pile up)."""
+        for other in self.lots_by_model[lot.model]:
+            if other.id > lot.id and not other.asm_closed and other.sent["ASM"] < other.plan["ASM"]:
+                return other
+        return None
+
+    def close_asm(self, lot):
+        """Once all of a lot's power sub-assys are matched or gone, cancel its missing assemblies."""
+        if not lot.asm_closed and "PWR" in lot.complete and lot.in_pool["PWR"] == 0:
+            lot.asm_closed = True
+            self.cancel(lot, "ASM", lot.plan["ASM"] - lot.sent["ASM"])
 
     def item_end(self, lot, seg):
         lot.remaining[seg] -= 1
@@ -566,13 +650,18 @@ class LCDPlant:
         lot.complete.add(seg)
         for c in SEG_CHILDREN.get(seg, ()):
             self.cancel(lot, c, lot.plan[c] - lot.sent[c])
-        if seg in MERGE_INPUTS and all(s in lot.complete for s in MERGE_INPUTS):
-            self.try_match(lot)
-            for s in MERGE_INPUTS:                      # unmatched sub-assemblies
-                lot.unmatched[s] += len(lot.buffer[s])
-                self.wip.add(-len(lot.buffer[s]))
-                lot.buffer[s].clear()
-            self.cancel(lot, "ASM", lot.plan["ASM"] - lot.sent["ASM"])
+        if self.pooled:
+            if seg == "PWR":                           # keyboards/backlights stay pooled for later lots
+                self.close_asm(lot)
+        elif seg in MERGE_INPUTS and all(s in lot.complete for s in MERGE_INPUTS):
+            self.try_match(lot.id)
+            pool = self.match_pool.pop(lot.id, {})
+            for s, q in pool.items():                   # sub-assemblies left over at lot end
+                lot.unmatched[s] += len(q)
+                lot.in_pool[s] -= len(q)
+                self.pipe[(lot.model, s)] -= len(q)
+                self.wip.add(-len(q))
+            self.close_asm(lot)
         if seg == "ASM":
             lot.done_time = self.env.now
 

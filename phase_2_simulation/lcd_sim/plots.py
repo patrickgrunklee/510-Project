@@ -357,6 +357,111 @@ def plot_flow_time(res):
     return fig
 
 
+WE_RULES = {
+    1: "1 point beyond 3σ",
+    2: "2 of 3 beyond 2σ (same side)",
+    3: "4 of 5 beyond 1σ (same side)",
+    4: "8 in a row on one side of CL",
+}
+
+
+def western_electric(z):
+    """Western Electric (Shewhart run) rules on standardized values z = (x - CL) / sigma.
+
+    Returns a DataFrame of booleans, one column per rule; a point is flagged when it
+    completes a violating run (the run's other qualifying points are flagged too).
+    """
+    z = np.asarray(z, dtype=float)
+    n = len(z)
+    flags = {r: np.zeros(n, bool) for r in WE_RULES}
+    flags[1] = np.abs(z) > 3
+    for side in (1, -1):
+        s = side * z
+        for rule, (k, m, lim) in {2: (2, 3, 2), 3: (4, 5, 1), 4: (8, 8, 0)}.items():
+            hit = s > lim
+            if n < m:
+                continue
+            win = np.lib.stride_tricks.sliding_window_view(hit, m)      # window ending at i = start + m - 1
+            ends = np.flatnonzero((win.sum(axis=1) >= k) & win[:, -1])
+            for e in ends:
+                flags[rule][e:e + m] |= win[e]
+    return pd.DataFrame({f"Rule {r}": flags[r] for r in WE_RULES})
+
+
+def flow_time_spc(res):
+    """Individuals (I) chart statistics of flow time, one point per finished display.
+
+    Points are ordered by completion time within each model. CL = mean flow time;
+    sigma = MR-bar / 1.128 (average moving range of consecutive displays);
+    limits CL +/- k sigma.  Western Electric rules 1-4 are tested on z = (x - CL) / sigma.
+    """
+    f = res.flow.sort_values("Done")
+    out = []
+    for m in MODELS:
+        d = f[f.Model == m][["Part", "Model", "Done", "Flow time (hr)"]].reset_index(drop=True)
+        d["x"] = d["Flow time (hr)"]
+        d["Hour"] = (d.Done - res.scenario.warmup_min) / 60
+        d["MR"] = d.x.diff().abs()
+        cl, sigma = d.x.mean(), d.MR.mean() / 1.128
+        d["CL"], d["sigma"] = cl, sigma
+        for k in (1, 2, 3):
+            d[f"+{k}σ"], d[f"-{k}σ"] = cl + k * sigma, max(0.0, cl - k * sigma)
+        d["z"] = (d.x - cl) / sigma
+        rules = western_electric(d.z)
+        d = pd.concat([d, rules], axis=1)
+        d["Signal"] = rules.any(axis=1)
+        out.append(d)
+    return pd.concat(out, ignore_index=True)
+
+
+def plot_flow_time_spc(res, log=True):
+    """Individuals control chart of display flow time per model, with Western Electric rule signals.
+
+    log=True puts the y axis on a log scale so the control band stays readable next to
+    the long flow-time tail (limits and rules are still computed on the raw hours).
+    """
+    spc = flow_time_spc(res)
+    fig, axes = plt.subplots(len(MODELS), 1, figsize=(13, 2.9 * len(MODELS)), sharex=True)
+    for ax, m in zip(np.atleast_1d(axes), MODELS):
+        d = spc[spc.Model == m]
+        cl, sg = d.CL.iloc[0], d.sigma.iloc[0]
+        lo = 1e-3 if log else 0
+        ax.axhspan(max(lo, cl - sg), cl + sg, color=GRID, alpha=0.45, lw=0)
+        ax.axhspan(max(lo, cl - 2 * sg), cl + 2 * sg, color=GRID, alpha=0.25, lw=0)
+        ax.plot(d.Hour, d.x, color=MUTED, lw=0.3, alpha=0.5, zorder=2)
+        ok, bad = d[~d.Signal], d[d.Signal]
+        ax.scatter(ok.Hour, ok.x, s=3, color=INK, lw=0, zorder=3, label=f"In control ({len(ok):,})")
+        ax.scatter(bad.Hour, bad.x, s=3, color="#d03b3b", lw=0, zorder=4,
+                   label=f"Out of control, any rule ({len(bad):,})")
+        lcl = max(0, cl - 3 * sg)
+        for y, lab, ls in [(cl + 3 * sg, "UCL", "--"), (lcl, "LCL", "--"), (cl, "CL", "-")]:
+            if log and y <= 0:
+                continue
+            ax.axhline(y, color=INK if ls == "--" else INK2, ls=ls, lw=0.9, zorder=5)
+            ax.text(1.0, y, f" {lab} {y:.2f}", transform=ax.get_yaxis_transform(),
+                    va="center", fontsize=7, color=INK2, clip_on=False)
+        for v in np.arange(MIN_PER_WEEK / 60, d.Hour.max(), MIN_PER_WEEK / 60):
+            ax.axvline(v, color=AXIS, lw=0.7, zorder=1)
+        if log:
+            ax.set_yscale("log")
+            ax.set_ylim(min(d.x.min(), lcl if lcl > 0 else d.x.min()) * 0.8, d.x.max() * 1.3)
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
+            ax.yaxis.set_minor_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}" if f"{v:g}"[0] in "1235" else ""))
+        else:
+            ax.set_ylim(0, d.x.quantile(0.999) * 1.05)
+        ax.set_ylabel("Flow time (hr, log)" if log else "Flow time (hr)")
+        ax.set_title(m, loc="left", color=MODEL_COLOR[m])
+        ax.set_title(f"{d.Signal.sum():,}/{len(d):,} displays signal ({d.Signal.mean():.0%})  ·  "
+                     f"σ̂ = MR̄/1.128 = {sg:.3f} h", loc="right", fontsize=8, fontweight="normal", color=INK2)
+        ax.legend(loc="upper left", ncol=2, fontsize=7, markerscale=3)
+    ax.set_xlabel("Completion time (productive hours after warm-up)")
+    fig.suptitle("Flow time individuals (I) charts with Western Electric rules — one point per finished display "
+                 "(red = breaks any of rules 1–4; shaded = 1σ / 2σ zones; vertical lines = weeks)",
+                 x=0.01, ha="left", fontsize=10, fontweight="bold", color=INK)
+    fig.tight_layout()
+    return fig
+
+
 def plot_throughput(res):
     f = res.flow.copy()
     f["Week"] = ((f.Done - res.scenario.warmup_min) // MIN_PER_WEEK).astype(int) + 1

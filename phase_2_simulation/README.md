@@ -52,6 +52,7 @@ reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_
 | `failure_mode` | `"count"` | `"count"` = every N parts. `"time"` = EXPO(MTBF) wall-clock. |
 | `tqm` | False | Cuts repair and PM time by 75%. |
 | `setup_scope` | `"machine"` | `"machine"`: setup when an individual machine changes model. `"station"`: Phase 1 one-setup convention with lot gates. `"workcell"`: station-group team setup once per product lot, with mixed cyclic arrivals. |
+| `setup_staggered` | `True` | For `setup_scope="workcell"`: each machine sets up for a new lot by itself when it frees up (one operator, per-machine setup time) and runs the part straight after; other machines keep working and a machine under repair delays only itself. `False` = the original whole-station group setup (station drains, every machine idle, crew sets up together). |
 | `setup_crew` | `{}` | For `setup_scope="workcell"`, operators reserved per station, defaulting to machine count. Example: `{"5-A": 3}`. Elapsed setup = machine count × effective setup time / crew. Crew cannot exceed the cell pool. |
 | `op_priority={"1-M": -1}` | none | Seize priority for operators. A lower number is served first. |
 | `repair_uses_operator` | False | Repairs and PM tie up a line operator. |
@@ -66,7 +67,8 @@ reps, summary = run_replications(get_scenario(3, operators={"Fab": 8}), n=10, n_
    - **After 2-M** that separates into a power strip/PCB/LCD branch (→ 3-A → 5-A) and a backlight/sensor branch (→ 6-A).
    - Each branch is sent `ceil(EOQ × f)` items, where *f* is the Phase 1 scrap factor (`Prod Req` sheet), so enough survive to make EOQ good units.
    - Components beyond a branch's need are counted as **spare**.
-   - **Match:** one sub-assembly of each type from the same lot becomes one display assembly → 7-M (M860) or 8-A (M970/M1080). Sub-assemblies left over when the lot closes are counted as **unmatched**.
+   - **Match:** one keyboard, one power-strip/PCB/LCD and one backlight sub-assembly become one display assembly → 7-M (M860) or 8-A (M970/M1080), oldest first (FIFO). In **cyclic/heijunka unit flow** they only need the same **model** (any lot; parts are interchangeable within a model), with one pool per model and sub-assembly type. In **lot-gated product runs** they must come from the same lot, and leftovers at lot end are counted as **unmatched**. Unit flow details: The display is credited to the lot of its power sub-assembly, the pacing branch. If that lot already has its planned assemblies, the next open lot of the model gets it. If no lot needs it, the oldest complete set goes to spare stock (**unmatched**).
+   - **Kit pull** (cyclic/heijunka only; `kit_pull=True`, `pull_margin=0`): at each Separate, a keyboard or backlight is built only when that branch's pipeline for the model (in process + pooled) is fewer than `pull_margin` items ahead of the power-strip pipeline (power strips + LCD/PCB sets not yet split). Otherwise the kit component is kept as a **spare**. The per-lot keyboard/backlight quotas are lifted (any kit may supply one), so the pull rule alone sets the balance. This stops the shorter, lower-scrap branches from over-producing, so pooled stock and match wait stay small.
 3. **Scrap** is a Bernoulli draw after each operation, at the station × model rate, and removes only the item at that station (e.g. one keyboard).
 4. **Failures are count-based and non-preemptive.**
    - PM happens every *PM frequency* parts.
